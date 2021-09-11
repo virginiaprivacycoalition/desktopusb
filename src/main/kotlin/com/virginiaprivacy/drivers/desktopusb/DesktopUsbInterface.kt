@@ -21,7 +21,7 @@ class DesktopUsbInterface(
     class Callback(private val transfers: LinkedTransferQueue<Transfer>) : TransferCallback {
         override fun processTransfer(transfer: Transfer) {
             val read = transfer.actualLength()
-            transfer.setBuffer(transfer.buffer().position(read))
+            transfer.setBuffer(transfer.buffer().position(read) as ByteBuffer)
             transfers.put(transfer)
         }
     }

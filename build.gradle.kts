@@ -24,3 +24,14 @@ dependencies {
 tasks.getByName<Test>("test") {
     useJUnitPlatform()
 }
+
+publishing {
+    publications {
+        create<MavenPublication>("release") {
+            group = "com.github.virginiaprivacycoalition"
+            artifactId = "desktopusb"
+            version = "1.0.0"
+            from(components["java"])
+        }
+    }
+}

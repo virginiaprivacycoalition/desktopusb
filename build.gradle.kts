@@ -2,9 +2,10 @@ plugins {
     kotlin("jvm") version "1.5.30"
     `java-library`
     java
+    `maven-publish`
 }
 
-group = "com.virginiaprivacy.drivers"
+group = "com.github.virginiaprivacycoalition"
 version = "1.0.0"
 
 repositories {

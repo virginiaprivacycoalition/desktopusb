@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.github.virginiaprivacycoalition"
-version = "1.0.1"
+version = "1.0.2"
 
 repositories {
     mavenCentral()
@@ -17,6 +17,7 @@ dependencies {
     implementation(kotlin("stdlib"))
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.6.0")
     implementation("org.usb4java:usb4java:1.3.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.5.2-native-mt")
     implementation("com.github.virginiaprivacycoalition:sdr:0.2.3")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine")
 }
@@ -30,7 +31,7 @@ publishing {
         create<MavenPublication>("release") {
             group = "com.github.virginiaprivacycoalition"
             artifactId = "desktopusb"
-            version = "1.0.1"
+            version = "1.0.2"
             from(components["java"])
         }
     }

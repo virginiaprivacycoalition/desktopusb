@@ -105,7 +105,6 @@ class DesktopUsbInterface(
     }
 
     override fun shutdown() {
-        LibUsb.resetDevice(handle)
         LibUsb.close(handle)
     }
 
@@ -153,7 +152,7 @@ class DesktopUsbInterface(
                 descriptor = DeviceDescriptor()
                 val r = LibUsb.getDeviceDescriptor(it, descriptor)
                 if (r != LibUsb.SUCCESS) {
-                    throw LibUsbException(r)
+
                 }
                 descriptor.idVendor() == vendorID && descriptor.idProduct() == productID
             }?.let {

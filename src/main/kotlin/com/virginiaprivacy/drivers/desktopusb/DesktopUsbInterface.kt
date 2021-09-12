@@ -145,6 +145,7 @@ class DesktopUsbInterface(
         const val CONTROL_IN = LibUsb.ENDPOINT_IN.toInt() or LibUsb.REQUEST_TYPE_VENDOR.toInt()
 
         fun findDevice(vendorID: Short, productID: Short): DesktopUsbInterface {
+            LibUsb.init(null)
             val deviceList = DeviceList()
             LibUsb.getDeviceList(null, deviceList)
             var descriptor: DeviceDescriptor

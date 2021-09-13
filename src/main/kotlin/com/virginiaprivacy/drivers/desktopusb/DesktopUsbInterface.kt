@@ -1,7 +1,6 @@
 package com.virginiaprivacy.drivers.desktopusb
 
 import com.virginiaprivacy.drivers.sdr.usb.UsbIFace
-import kotlinx.coroutines.flow.MutableStateFlow
 import org.usb4java.*
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -16,15 +15,22 @@ class DesktopUsbInterface(
 ) :
     UsbIFace {
 
+    private val log = System.getLogger(this::class.java.name)
+
+    private val availableTransfers = LinkedTransferQueue<Transfer>()
+
     private val completedTransfers = LinkedTransferQueue<Transfer>()
 
-    class Callback(private val transfers: LinkedTransferQueue<Transfer>) : TransferCallback {
-        override fun processTransfer(transfer: Transfer) {
-            val read = transfer.actualLength()
-            transfer.setBuffer(transfer.buffer().position(read) as ByteBuffer)
-            transfers.put(transfer)
+    private val callback = TransferCallback { transfer ->
+        if (transfer.status() != LibUsb.SUCCESS) {
+            println("Error with transfer: ${LibUsb.errorName(transfer.status())}")
+            return@TransferCallback
         }
+        val read = transfer.actualLength()
+        transfer.setBuffer(transfer.buffer().position(read) as ByteBuffer)
+        completedTransfers.put(transfer)
     }
+
 
     override val manufacturerName: String
         get() = LibUsb.getStringDescriptor(handle, descriptor.iManufacturer())
@@ -94,28 +100,30 @@ class DesktopUsbInterface(
         }
     }
 
-    private val availableTransfers = LinkedTransferQueue<Transfer>()
 
     override suspend fun prepareNewBulkTransfer(transferIndex: Int, byteBuffer: ByteBuffer) {
         val transfer = LibUsb.allocTransfer()
         LibUsb.fillBulkTransfer(
             transfer, handle,
-            0x81.toByte(), byteBuffer, Callback(completedTransfers), transferIndex,
+            0x81.toByte(), byteBuffer, callback, transferIndex,
             1000000L
         )
         availableTransfers.put(transfer)
     }
 
     override fun releaseUsbDevice() {
-        availableTransfers.forEach {
-            LibUsb.cancelTransfer(it)
-            LibUsb.freeTransfer(it)
+        val transfers = mutableListOf<Transfer>()
+        availableTransfers.drainTo(transfers)
+        completedTransfers.drainTo(transfers)
+        try {
+            transfers.forEach {
+                LibUsb.freeTransfer(it)
+            }
+        } catch (e: Throwable) {
+            println(e.message)
+        } finally {
+            LibUsb.releaseInterface(handle, 0)
         }
-        completedTransfers.forEach {
-            LibUsb.cancelTransfer(it)
-            LibUsb.freeTransfer(it)
-        }
-        LibUsb.releaseInterface(handle, 0)
     }
 
     override fun shutdown() {
@@ -148,7 +156,7 @@ class DesktopUsbInterface(
         completedTransfers.poll(1000, TimeUnit.MILLISECONDS)?.let {
             val result = it.userData() as Int
             availableTransfers.put(it)
-            return  result
+            return result
         }
         throw IOException()
     }

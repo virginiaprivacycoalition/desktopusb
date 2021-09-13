@@ -15,8 +15,6 @@ class DesktopUsbInterface(
 ) :
     UsbIFace {
 
-    private val log = System.getLogger(this::class.java.name)
-
     private val availableTransfers = LinkedTransferQueue<Transfer>()
 
     private val completedTransfers = LinkedTransferQueue<Transfer>()

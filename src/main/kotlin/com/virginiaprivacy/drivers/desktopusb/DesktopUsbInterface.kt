@@ -94,37 +94,49 @@ class DesktopUsbInterface(
         }
     }
 
-    private val transferIndex = MutableStateFlow(0)
+    private val availableTransfers = LinkedTransferQueue<Transfer>()
 
     override suspend fun prepareNewBulkTransfer(transferIndex: Int, byteBuffer: ByteBuffer) {
-        // do nothing atm
+        val transfer = LibUsb.allocTransfer()
+        LibUsb.fillBulkTransfer(
+            transfer, handle,
+            0x81.toByte(), byteBuffer, Callback(completedTransfers), transferIndex,
+            1000000L
+        )
+        availableTransfers.put(transfer)
     }
 
     override fun releaseUsbDevice() {
+        availableTransfers.forEach {
+            LibUsb.cancelTransfer(it)
+            LibUsb.freeTransfer(it)
+        }
+        completedTransfers.forEach {
+            LibUsb.cancelTransfer(it)
+            LibUsb.freeTransfer(it)
+        }
         LibUsb.releaseInterface(handle, 0)
     }
 
     override fun shutdown() {
+        availableTransfers.forEach {
+            LibUsb.cancelTransfer(it)
+            LibUsb.freeTransfer(it)
+        }
+        completedTransfers.forEach {
+            LibUsb.cancelTransfer(it)
+            LibUsb.freeTransfer(it)
+        }
         LibUsb.close(handle)
     }
 
     override suspend fun submitBulkTransfer(buffer: ByteBuffer) {
-        val bulkTransfer = LibUsb.allocTransfer()
-        val transferNumber = transferIndex.value
-        if (transferIndex.value == 11) {
-            transferIndex.emit(0)
-        } else {
-            transferIndex.emit(transferNumber + 1)
-        }
-
-        LibUsb.fillBulkTransfer(
-            bulkTransfer, handle,
-            0x81.toByte(), buffer, Callback(completedTransfers), transferNumber,
-            1000000L
-        )
-        val result = LibUsb.submitTransfer(bulkTransfer)
-        if (result != LibUsb.SUCCESS) {
-            throw IOException("Error submitting transfer: ${LibUsb.errorName(result)}")
+        availableTransfers.poll(200, TimeUnit.MILLISECONDS)?.let {
+            it.setBuffer(buffer)
+            val result = LibUsb.submitTransfer(it)
+            if (result != LibUsb.SUCCESS) {
+                throw IOException("Error submitting transfer: ${LibUsb.errorName(result)}")
+            }
         }
     }
 
@@ -133,8 +145,12 @@ class DesktopUsbInterface(
         if (r != LibUsb.SUCCESS) {
             throw IOException(LibUsb.errorName(r))
         }
-        val transfer = completedTransfers.poll(1000, TimeUnit.MILLISECONDS)
-        return transfer.userData() as Int
+        completedTransfers.poll(1000, TimeUnit.MILLISECONDS)?.let {
+            val result = it.userData() as Int
+            availableTransfers.put(it)
+            return  result
+        }
+        throw IOException()
     }
 
 

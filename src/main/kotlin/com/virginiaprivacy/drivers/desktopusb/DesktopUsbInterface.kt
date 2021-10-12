@@ -7,6 +7,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.LinkedTransferQueue
 import java.util.concurrent.TimeUnit
+import kotlin.system.exitProcess
 
 class DesktopUsbInterface(
     private val device: Device,
@@ -188,8 +189,24 @@ class DesktopUsbInterface(
                 LibUsb.getDeviceDescriptor(it, descriptor)
                 return DesktopUsbInterface(device = it, handle, descriptor)
             }
+            println("No usable RTL-SDR device found. Use device ids from the following list of all accessible devices:")
+            deviceList.mapNotNull {
+                val d = DeviceDescriptor()
+                if (LibUsb.getDeviceDescriptor(it, d) == LibUsb.SUCCESS) {
+                    val m = d.buffer.array().asList().subList(d.iManufacturer().toInt(), 256)
+                    "${d.idVendor()}:${d.idProduct()}:${m.toByteArray().decodeToString()}"
+                } else {
+                    null
+                }
+            }
+                .forEach {
+                    val vID = it.split(":")[0]
+                    val pID = it.split(":")[1]
+                    val ds = it.split(":")[2]
+                    println("VendorID: $vID, ProductID: $pID: $ds")
+                }
             LibUsb.freeDeviceList(deviceList, true)
-            throw IOException("No devices found.")
+            exitProcess(-1)
         }
     }
 }

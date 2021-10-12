@@ -168,26 +168,39 @@ class DesktopUsbInterface(
 
         fun findDevice(vendorID: Short, productID: Short): DesktopUsbInterface {
             LibUsb.init(null)
+            val handle = LibUsb.openDeviceWithVidPid(null, vendorID, productID)
+                ?: throw RuntimeException("""No device with vendor ID $vendorID and product ID $productID found.
+                            | Check your device's connection and ensure you have permission to open the device.
+                        """.trimMargin())
+            val device = LibUsb.getDevice(handle)
+            val descriptor = DeviceDescriptor()
+            LibUsb.getDeviceDescriptor(device, descriptor)
+            return DesktopUsbInterface(device, handle, descriptor)
+        }
+
+        fun findAnyAvailableDevice() {
+            LibUsb.init(null)
             val deviceList = DeviceList()
             LibUsb.getDeviceList(null, deviceList)
             var descriptor: DeviceDescriptor
-            deviceList.firstOrNull {
+            deviceList.mapNotNull {
                 descriptor = DeviceDescriptor()
                 val r = LibUsb.getDeviceDescriptor(it, descriptor)
                 if (r != LibUsb.SUCCESS) {
-
+                    null
                 }
-                descriptor.idVendor() == vendorID && descriptor.idProduct() == productID
-            }?.let {
+
                 val handle = DeviceHandle()
                 val result = LibUsb.open(it, handle)
                 if (result != LibUsb.SUCCESS) {
-                    throw LibUsbException(result)
+                    null
+                } else {
+                    LibUsb.freeDeviceList(deviceList, true)
+                    descriptor = DeviceDescriptor()
+                    LibUsb.getDeviceDescriptor(it, descriptor)
+
+                    DesktopUsbInterface(device = it, handle, descriptor)
                 }
-                LibUsb.freeDeviceList(deviceList, true)
-                descriptor = DeviceDescriptor()
-                LibUsb.getDeviceDescriptor(it, descriptor)
-                return DesktopUsbInterface(device = it, handle, descriptor)
             }
             println("No usable RTL-SDR device found. Use device ids from the following list of all accessible devices:")
             deviceList.mapNotNull {

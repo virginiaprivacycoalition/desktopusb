@@ -193,8 +193,9 @@ class DesktopUsbInterface(
             deviceList.mapNotNull {
                 val d = DeviceDescriptor()
                 if (LibUsb.getDeviceDescriptor(it, d) == LibUsb.SUCCESS) {
-                    val m = d.buffer.array().asList().subList(d.iManufacturer().toInt(), 256)
-                    "${d.idVendor()}:${d.idProduct()}:${m.toByteArray().decodeToString()}"
+                    val buf = ByteArray(d.buffer.remaining())
+                    d.buffer.get(buf, d.iManufacturer().toInt(), d.buffer.capacity() - d.iManufacturer().toInt())
+                    "${d.idVendor()}:${d.idProduct()}:${buf.decodeToString()}"
                 } else {
                     null
                 }

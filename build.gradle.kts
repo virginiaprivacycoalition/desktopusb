@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.github.virginiaprivacycoalition"
-version = "1.0.8"
+version = "1.0.9"
 
 repositories {
     mavenCentral()
@@ -31,7 +31,7 @@ publishing {
         create<MavenPublication>("release") {
             group = "com.github.virginiaprivacycoalition"
             artifactId = "desktopusb"
-            version = "1.0.8"
+            version = "1.0.9"
             from(components["java"])
         }
     }

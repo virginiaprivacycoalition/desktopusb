@@ -1,5 +1,7 @@
 package com.virginiaprivacy.drivers.desktopusb
 
+import com.virginiaprivacy.drivers.sdr.IOStatus
+import com.virginiaprivacy.drivers.sdr.data.Status
 import com.virginiaprivacy.drivers.sdr.usb.UsbIFace
 import org.usb4java.*
 import java.io.IOException
@@ -157,7 +159,11 @@ class DesktopUsbInterface(
             availableTransfers.put(it)
             return result
         }
-        throw IOException()
+        if (Status.getIOStatus().value == IOStatus.ACTIVE) {
+            throw IOException()
+        } else {
+            return -1
+        }
     }
 
 

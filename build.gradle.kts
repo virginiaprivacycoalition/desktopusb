@@ -1,12 +1,12 @@
 plugins {
-    kotlin("jvm") version "1.6.0"
+    kotlin("jvm") version "1.6.10"
     `java-library`
     java
     `maven-publish`
 }
 
 group = "com.github.virginiaprivacycoalition"
-version = "1.1.8"
+version = "1.3.6"
 
 repositories {
     mavenCentral()
@@ -16,10 +16,14 @@ repositories {
 
 dependencies {
     implementation(kotlin("stdlib"))
-    testImplementation("org.junit.jupiter:junit-jupiter-api:5.6.0")
+    testImplementation("io.kotest:kotest-runner-junit5:5.1.0")
+    testImplementation("io.kotest:kotest-assertions-core:5.1.0")
+    testImplementation("io.kotest:kotest-property:5.1.0")
     implementation("org.usb4java:usb4java:1.3.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.5.2-native-mt")
-    api("com.github.virginiaprivacycoalition:sdr:0.3.5")
+    implementation("org.usb4java:usb4java-javax:1.3.0")
+    implementation("org.apache.commons:commons-collections4:4.4")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.0-native-mt")
+    api("com.github.virginiaprivacycoalition:sdr:0.6.1")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine")
 }
 
@@ -27,13 +31,18 @@ tasks.getByName<Test>("test") {
     useJUnitPlatform()
 }
 
+tasks.kotlinSourcesJar {
+    archiveClassifier.set("sources")
+}
+
 publishing {
     publications {
         create<MavenPublication>("release") {
             group = "com.github.virginiaprivacycoalition"
             artifactId = "desktopusb"
-            version = "1.1.8"
+            version = "1.3.6"
             from(components["java"])
+            artifact(tasks.kotlinSourcesJar)
         }
     }
 }

@@ -1,34 +1,115 @@
 package com.virginiaprivacy.drivers.desktopusb
 
-import com.virginiaprivacy.drivers.sdr.usb.UsbIFace
+import com.virginiaprivacy.drivers.sdr.RTLDevice
+import com.virginiaprivacy.drivers.sdr.usb.*
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import org.apache.commons.collections4.queue.CircularFifoQueue
 import org.usb4java.*
-import java.io.IOException
+import java.lang.IllegalStateException
 import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.util.concurrent.LinkedTransferQueue
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.CancellationException
+import java.util.concurrent.Executors
+import java.util.logging.Logger
 import kotlin.system.exitProcess
+import java.util.ArrayDeque
+import java.util.concurrent.BlockingDeque
+import java.util.concurrent.SynchronousQueue
 
 class DesktopUsbInterface(
-    private val device: Device,
     private val handle: DeviceHandle,
     private val descriptor: DeviceDescriptor
 ) :
     UsbIFace {
 
-    private val availableTransfers = LinkedTransferQueue<Transfer>()
+    private val availableTransfers = CircularFifoQueue<Transfer>(32)
 
-    private val completedTransfers = LinkedTransferQueue<Transfer>()
+
+    private val completedTransfers = CircularFifoQueue<Transfer>(32)
+
+    private val completedControlTransfers = CircularFifoQueue<Transfer>()
+
+    private val controlMutex = Mutex()
+
+    private val logger = Logger.getLogger(this::class.qualifiedName)
+
+    private var debugEnabled = false
+
 
     private val callback = TransferCallback { transfer ->
-        if (transfer.status() != LibUsb.SUCCESS) {
-            println("Error with transfer: ${LibUsb.errorName(transfer.status())}")
-            return@TransferCallback
+        when (transfer.status()) {
+            LibUsb.TRANSFER_COMPLETED -> {
+
+                val read = transfer.actualLength()
+                transfer.setBuffer(transfer.buffer().position(read))
+                completedTransfers.add(transfer)
+            }
+            LibUsb.TRANSFER_STALL -> {
+                availableTransfers.filter { it.status() != LibUsb.TRANSFER_COMPLETED }
+                    .onEach { LibUsb.cancelTransfer(it) }
+                LibUsb.clearHalt(handle, 0x81.toByte())
+                availableTransfers.add(transfer)
+                transfer()
+            }
+            LibUsb.TRANSFER_CANCELLED -> {
+                availableTransfers.add(transfer)
+                transfer()
+            }
+            else -> {
+                val setupPacket = LibUsb.controlTransferGetSetup(transfer)
+                val msg = ("""Error with control transfer: Error code """ + transfer.status() + """,
+                                | """ + LibUsb.errorName(transfer.status()) + """
+                                |
+                                |   SETUP PACKET:
+                                |   request type: """ + setupPacket.bmRequestType() + """
+                                |   request: """ + setupPacket.bRequest() + """
+                                |   index: """ + setupPacket.wIndex() + """
+                                |   length: """ + setupPacket.wLength() + """
+                                |   value: """ + setupPacket.wValue() + """
+                                |
+                            """).trimMargin()
+                transfer.setUserData(msg)
+                println(msg)
+                completedTransfers.add(transfer)
+            }
         }
-        val read = transfer.actualLength()
-        transfer.setBuffer(transfer.buffer().position(read) as ByteBuffer)
-        completedTransfers.put(transfer)
     }
+
+
+    private val controlCallback = TransferCallback { transfer ->
+        println("Control transfer: $transfer")
+        transfer.status().let {
+            when (it == LibUsb.TRANSFER_COMPLETED) {
+                true -> {
+                    val read = transfer.actualLength()
+                    transfer.buffer().position(read)
+                    completedControlTransfers.add(transfer)
+                    return@TransferCallback
+                }
+                else -> {
+                    val setupPacket = LibUsb.controlTransferGetSetup(transfer)
+                    val msg = """Error with control transfer: Error code ${transfer.status()},
+                    | ${LibUsb.errorName(transfer.status())}
+                    |
+                    |   SETUP PACKET:
+                    |   request type: ${setupPacket.bmRequestType()}
+                    |   request: ${setupPacket.bRequest()}
+                    |   index: ${setupPacket.wIndex()}
+                    |   length: ${setupPacket.wLength()}
+                    |   value: ${setupPacket.wValue()}
+                    |
+                """.trimMargin()
+                    transfer.setUserData(msg)
+                    println(msg)
+                    completedTransfers.add(transfer)
+                    return@TransferCallback
+                }
+            }
+        }
+    }
+
+    private val eventHandler = Executors.newFixedThreadPool(1).asCoroutineDispatcher()
 
 
     override val manufacturerName: String
@@ -48,74 +129,167 @@ class DesktopUsbInterface(
             println("Kernel driver is active. Attempting to detach...")
             LibUsb.setAutoDetachKernelDriver(handle, true)
         }
+        handle
         val r = LibUsb.claimInterface(handle, 0)
         if (r != 0) {
             throw LibUsbException("Error claiming interface!", r)
         }
+    }
 
+    init {
+        //LibUsb.setOption(null, LibUsb.OPTION_LOG_LEVEL, LibUsb.LOG_LEVEL_DEBUG)
     }
 
     override fun controlTransfer(
         direction: Int,
-        requestID: Int,
-        address: Int,
-        index: Int,
-        bytes: ByteArray,
+        address: Short,
+        index: Short,
+        bytes: ByteBuffer,
         length: Int,
         timeout: Int
-    ): Int {
-        return if (direction == CONTROL_OUT) {
-            val buffer = ByteBuffer.allocateDirect(length)
-            if (bytes.size > length) {
-                throw IOException("Length $length is not big enough to hold buffer with size ${bytes.size}")
+    ): ControlTransferResult {
+
+        bytes.rewind()
+
+
+
+        when (val r = LibUsb.controlTransfer(handle, direction.toByte(), 0, address, index, bytes, 0L)) {
+            in (0..Int.MAX_VALUE) -> {
+                return ControlTransferResult(
+                    ControlTransferDirection.get(direction.toByte()),
+                    ResultStatus.Success,
+                    ControlPacket(
+                        ByteArray(bytes.position()).apply {
+                            bytes.rewind()
+                            bytes.get(this)
+                        }
+                    )
+                )
             }
-            buffer.order(ByteOrder.BIG_ENDIAN)
-            buffer.put(bytes)
-            LibUsb.controlTransfer(
-                handle,
-                direction.toByte(),
-                requestID.toByte(),
-                address.toShort(),
-                index.toShort(),
-                buffer,
-                300
-            )
-        } else {
-            val buffer = ByteBuffer.allocateDirect(length)
-            val read = LibUsb.controlTransfer(
-                handle,
-                direction.toByte(),
-                requestID.toByte(),
-                address.toShort(),
-                index.toShort(),
-                buffer,
-                300
-            )
-            if (read > 0) {
-                buffer.rewind()
-                buffer.get(bytes)
+            in (arrayOf(LibUsb.ERROR_PIPE, LibUsb.ERROR_TIMEOUT)) -> {
+                try {
+                    LibUsb.clearHalt(handle, 0x00)
+                    val r2 =
+                        LibUsb.controlTransfer(handle, direction.toByte(), 0, address, index, bytes, 0L)
+                    if (r2 == LibUsb.SUCCESS) {
+                        return ControlTransferResult(
+                            ControlTransferDirection.get(direction.toByte()),
+                            ResultStatus.Success,
+                            ControlPacket(
+                                ByteArray(8)
+                            )
+                        )
+                    } else {
+                        LibUsb.resetDevice(handle)
+                        throw LibUsbException(r2)
+                    }
+                } catch (e: java.lang.Exception) {
+                    e.fillInStackTrace()
+                    throw e
+                }
+
             }
-            read
+           else -> {
+               if (r < 0) {
+                   throw java.lang.RuntimeException("Control transfer refused")
+               }
+               return ControlTransferResult(
+                   ControlTransferDirection.get(direction.toByte()),
+                   ResultStatus.Success,
+                   ControlPacket(
+                       ByteArray(bytes.position()).apply {
+                           bytes.rewind()
+                           bytes.get(this)
+                       }
+                   )
+               )
+           }
         }
+
     }
 
 
-    override suspend fun prepareNewBulkTransfer(transferIndex: Int, byteBuffer: ByteBuffer) {
+
+
+    override fun prepareNewBulkTransfer(byteBuffer: ByteBuffer) {
         val transfer = LibUsb.allocTransfer()
         LibUsb.fillBulkTransfer(
             transfer, handle,
-            0x81.toByte(), byteBuffer, callback, transferIndex,
+            0x81.toByte(), byteBuffer, callback, null,
             1000000L
         )
-        availableTransfers.put(transfer)
+        availableTransfers.add(transfer)
     }
+
+    override fun readBytes() = flow<ByteArray> {
+            while (currentCoroutineContext().isActive) {
+                val t = completedTransfers.poll() ?: continue
+                val b = t.buffer()
+                val bytes = ByteArray(b.position())
+                b.rewind()
+                b[bytes]
+                b.rewind()
+                availableTransfers.add(t)
+                transfer()
+                emit(bytes)
+
+        }
+
+
+    }
+        .onStart {
+            log("USB data flow collection started")
+            if (availableTransfers.isEmpty()) {
+                log("Available transfers was empty. Completed transfers size: ${completedTransfers.size}")
+                repeat(15) {
+                    prepareNewBulkTransfer(ByteBuffer.allocateDirect(RTLDevice.BUF_BYTES))
+                }
+            }
+            coroutineScope {  }
+            CoroutineScope(eventHandler).launch {
+                while (this.isActive) {
+                    log("Available transfer count: ${availableTransfers.size}, Completed transfer count: ${completedTransfers.size}")
+                    val r = LibUsb.handleEventsCompleted(null, null)
+                    if (r != LibUsb.SUCCESS) {
+                        throw IllegalStateException("Unable to handle libusb events: ${LibUsb.strError(r)}")
+                    }
+                }
+            }
+        }
+        .onCompletion {
+            cleanUpTransfers()
+            eventHandler.cancel()
+        }
+        .catch {
+            log("Suppressed exception during USB stream: ${it.message}")
+            repeat(15) {
+                prepareNewBulkTransfer(ByteBuffer.allocateDirect(RTLDevice.BUF_BYTES))
+            }
+        }
+
+
+    private fun cleanUpTransfers() {
+        availableTransfers.forEach {
+            LibUsb.cancelTransfer(it)
+        }
+        completedTransfers
+            .forEach {
+                LibUsb.cancelTransfer(it)
+                availableTransfers.add(it)
+            }
+    }
+
 
     override fun releaseUsbDevice() {
         val transfers = mutableListOf<Transfer>()
-        availableTransfers.drainTo(transfers)
-        completedTransfers.drainTo(transfers)
+        transfers.addAll(availableTransfers)
+        transfers.addAll(completedTransfers)
+        availableTransfers.clear()
+        completedTransfers.clear()
+
         try {
             transfers.forEach {
+                LibUsb.cancelTransfer(it)
                 LibUsb.freeTransfer(it)
             }
         } catch (e: Throwable) {
@@ -123,6 +297,12 @@ class DesktopUsbInterface(
         } finally {
             LibUsb.releaseInterface(handle, 0)
         }
+    }
+
+
+    override fun resetDevice() {
+        log("Resetting USB device handle.")
+        LibUsb.resetDevice(handle)
     }
 
     override fun shutdown() {
@@ -134,30 +314,35 @@ class DesktopUsbInterface(
             LibUsb.cancelTransfer(it)
             LibUsb.freeTransfer(it)
         }
+        eventHandler.cancel()
         LibUsb.close(handle)
     }
 
-    override suspend fun submitBulkTransfer(buffer: ByteBuffer) {
-        availableTransfers.poll(200, TimeUnit.MILLISECONDS)?.let {
-            it.setBuffer(buffer)
-            val result = LibUsb.submitTransfer(it)
-            if (result != LibUsb.SUCCESS) {
-                throw IOException("Error submitting transfer: ${LibUsb.errorName(result)}")
-            }
+    private fun transfer() {
+        LibUsb.submitTransfer(availableTransfers.remove())
+    }
+
+    private fun log(message: String) {
+        if (debugEnabled) {
+            logger.info(message)
         }
     }
 
-    override suspend fun waitForTransferResult(): Int {
-        val r = LibUsb.handleEventsCompleted(null, null)
-        if (r != LibUsb.SUCCESS) {
-            throw IOException(LibUsb.errorName(r))
-        }
-        completedTransfers.poll(1000, TimeUnit.MILLISECONDS)?.let {
-            val result = it.userData() as Int
-            availableTransfers.put(it)
-            return result
-        }
-        throw IOException()
+    override fun submitBulkTransfer() {
+        availableTransfers.poll()
+            .let {
+                val result = LibUsb.submitTransfer(it)
+                if (result != LibUsb.SUCCESS) {
+                    throw
+                    CancellationException(
+                        "Error submitting transfer: ${
+                            LibUsb.errorName(
+                                result
+                            )
+                        }"
+                    )
+                }
+            }
     }
 
 
@@ -169,16 +354,18 @@ class DesktopUsbInterface(
         fun findDevice(vendorID: Short, productID: Short): DesktopUsbInterface {
             LibUsb.init(null)
             val handle = LibUsb.openDeviceWithVidPid(null, vendorID, productID)
-                ?: throw RuntimeException("""No device with vendor ID $vendorID and product ID $productID found.
+                ?: throw RuntimeException(
+                    """No device with vendor ID $vendorID and product ID $productID found.
                             | Check your device's connection and ensure you have permission to open the device.
-                        """.trimMargin())
+                        """.trimMargin()
+                )
             val device = LibUsb.getDevice(handle)
             val descriptor = DeviceDescriptor()
             LibUsb.getDeviceDescriptor(device, descriptor)
-            return DesktopUsbInterface(device, handle, descriptor)
+            return DesktopUsbInterface(handle, descriptor)
         }
 
-        fun findAnyAvailableDevice() {
+        fun findAnyAvailableDevice(): DesktopUsbInterface? {
             LibUsb.init(null)
             val deviceList = DeviceList()
             LibUsb.getDeviceList(null, deviceList)
@@ -187,7 +374,7 @@ class DesktopUsbInterface(
                 descriptor = DeviceDescriptor()
                 val r = LibUsb.getDeviceDescriptor(it, descriptor)
                 if (r != LibUsb.SUCCESS) {
-                    null
+                   null
                 }
 
                 val handle = DeviceHandle()
@@ -199,7 +386,7 @@ class DesktopUsbInterface(
                     descriptor = DeviceDescriptor()
                     LibUsb.getDeviceDescriptor(it, descriptor)
 
-                    DesktopUsbInterface(device = it, handle, descriptor)
+                   return DesktopUsbInterface(handle, descriptor)
                 }
             }
             println("No usable RTL-SDR device found. Use device ids from the following list of all accessible devices:")
@@ -224,3 +411,4 @@ class DesktopUsbInterface(
         }
     }
 }
+

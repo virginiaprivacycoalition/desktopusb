@@ -3,27 +3,27 @@ package com.virginiaprivacy.drivers.desktopusb
 import com.virginiaprivacy.drivers.sdr.RTLDevice
 import com.virginiaprivacy.drivers.sdr.usb.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.onClosed
+import kotlinx.coroutines.channels.onFailure
+import kotlinx.coroutines.channels.onSuccess
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import org.apache.commons.collections4.queue.CircularFifoQueue
 import org.usb4java.*
 import java.lang.IllegalStateException
 import java.nio.ByteBuffer
-import java.util.concurrent.CancellationException
-import java.util.concurrent.Executors
 import java.util.logging.Logger
 import kotlin.system.exitProcess
-import java.util.ArrayDeque
-import java.util.concurrent.BlockingDeque
-import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.*
+import java.util.concurrent.CancellationException
 
 class DesktopUsbInterface(
     private val handle: DeviceHandle,
-    private val descriptor: DeviceDescriptor
+    private val descriptor: DeviceDescriptor, private var debugEnabled: Boolean = false
 ) :
     UsbIFace {
 
-    private val availableTransfers = CircularFifoQueue<Transfer>(32)
+    private val availableTransfers = LinkedTransferQueue<Transfer>()
 
 
     private val completedTransfers = CircularFifoQueue<Transfer>(32)
@@ -34,27 +34,32 @@ class DesktopUsbInterface(
 
     private val logger = Logger.getLogger(this::class.qualifiedName)
 
-    private var debugEnabled = false
-
 
     private val callback = TransferCallback { transfer ->
         when (transfer.status()) {
             LibUsb.TRANSFER_COMPLETED -> {
-
                 val read = transfer.actualLength()
+                val bytes = ByteArray(read)
                 transfer.setBuffer(transfer.buffer().position(read))
-                completedTransfers.add(transfer)
+                transfer.buffer().run {
+                    rewind()
+                    get(bytes)
+                    rewind()
+                }
+                availableTransfers.add(transfer)
+                submitBulkTransfer()
+                if (!RTLDevice.bytes.isClosedForSend)
+                    RTLDevice.bytes.trySend(bytes)
+                        .onSuccess {  return@TransferCallback }
+                        .onClosed { return@TransferCallback }
+                        .onFailure { clearStalledTransfer(transfer) }
             }
             LibUsb.TRANSFER_STALL -> {
-                availableTransfers.filter { it.status() != LibUsb.TRANSFER_COMPLETED }
-                    .onEach { LibUsb.cancelTransfer(it) }
-                LibUsb.clearHalt(handle, 0x81.toByte())
-                availableTransfers.add(transfer)
-                transfer()
+                clearStalledTransfer(transfer)
             }
             LibUsb.TRANSFER_CANCELLED -> {
                 availableTransfers.add(transfer)
-                transfer()
+                submitTransfer()
             }
             else -> {
                 val setupPacket = LibUsb.controlTransferGetSetup(transfer)
@@ -74,6 +79,14 @@ class DesktopUsbInterface(
                 completedTransfers.add(transfer)
             }
         }
+    }
+
+    private fun clearStalledTransfer(transfer: Transfer) {
+        availableTransfers.filter { it.status() != LibUsb.TRANSFER_COMPLETED }
+            .onEach { LibUsb.cancelTransfer(it) }
+        LibUsb.clearHalt(handle, 0x81.toByte())
+        transfer.let { availableTransfers.add(it) }
+        submitTransfer()
     }
 
 
@@ -137,7 +150,9 @@ class DesktopUsbInterface(
     }
 
     init {
-        //LibUsb.setOption(null, LibUsb.OPTION_LOG_LEVEL, LibUsb.LOG_LEVEL_DEBUG)
+//        if (debugEnabled) {
+//            LibUsb.setOption(null, LibUsb.OPTION_LOG_LEVEL, LibUsb.LOG_LEVEL_DEBUG)
+//        }
     }
 
     override fun controlTransfer(
@@ -145,15 +160,13 @@ class DesktopUsbInterface(
         address: Short,
         index: Short,
         bytes: ByteBuffer,
-        length: Int,
-        timeout: Int
     ): ControlTransferResult {
 
-        bytes.rewind()
 
 
-
-        when (val r = LibUsb.controlTransfer(handle, direction.toByte(), 0, address, index, bytes, 0L)) {
+        when (val r = LibUsb.controlTransfer(handle, direction.toByte(), 0, address, index, bytes,
+            RTLDevice.CTRL_TIMEOUT.toLong()
+        )) {
             in (0..Int.MAX_VALUE) -> {
                 return ControlTransferResult(
                     ControlTransferDirection.get(direction.toByte()),
@@ -162,16 +175,17 @@ class DesktopUsbInterface(
                         ByteArray(bytes.position()).apply {
                             bytes.rewind()
                             bytes.get(this)
+
                         }
                     )
                 )
             }
             in (arrayOf(LibUsb.ERROR_PIPE, LibUsb.ERROR_TIMEOUT)) -> {
                 try {
-                    LibUsb.clearHalt(handle, 0x00)
+                    log("Halt result: ${LibUsb.clearHalt(handle, 0x00)}")
                     val r2 =
-                        LibUsb.controlTransfer(handle, direction.toByte(), 0, address, index, bytes, 0L)
-                    if (r2 == LibUsb.SUCCESS) {
+                        LibUsb.controlTransfer(handle, direction.toByte(), 0, address, index, bytes, RTLDevice.CTRL_TIMEOUT.toLong())
+                    if (r2 > 0) {
                         return ControlTransferResult(
                             ControlTransferDirection.get(direction.toByte()),
                             ResultStatus.Success,
@@ -180,12 +194,19 @@ class DesktopUsbInterface(
                             )
                         )
                     } else {
-                        LibUsb.resetDevice(handle)
+                        println(r2)
                         throw LibUsbException(r2)
                     }
                 } catch (e: java.lang.Exception) {
-                    e.fillInStackTrace()
-                    throw e
+                    log("Transfer direction: ${direction
+                        .toByte()} transfer address: ${address} transfer index: $index")
+                    val length = bytes.capacity()
+                    val inout = ByteArray(length)
+                    bytes.rewind()
+                    bytes.get(inout)
+                    bytes.rewind()
+                    log("Transfer bytes: ${inout.asList()}")
+                    return ControlTransferResult(ControlTransferDirection.get(direction.toByte()), ResultStatus.Success, ControlPacket(ByteArray(8)))
                 }
 
             }
@@ -208,9 +229,6 @@ class DesktopUsbInterface(
 
     }
 
-
-
-
     override fun prepareNewBulkTransfer(byteBuffer: ByteBuffer) {
         val transfer = LibUsb.allocTransfer()
         LibUsb.fillBulkTransfer(
@@ -229,8 +247,9 @@ class DesktopUsbInterface(
                 b.rewind()
                 b[bytes]
                 b.rewind()
+
                 availableTransfers.add(t)
-                transfer()
+                submitTransfer()
                 emit(bytes)
 
         }
@@ -258,7 +277,7 @@ class DesktopUsbInterface(
         }
         .onCompletion {
             cleanUpTransfers()
-            eventHandler.cancel()
+            eventHandler.job.cancelAndJoin()
         }
         .catch {
             log("Suppressed exception during USB stream: ${it.message}")
@@ -266,6 +285,7 @@ class DesktopUsbInterface(
                 prepareNewBulkTransfer(ByteBuffer.allocateDirect(RTLDevice.BUF_BYTES))
             }
         }
+        .cancellable()
 
 
     private fun cleanUpTransfers() {
@@ -318,7 +338,7 @@ class DesktopUsbInterface(
         LibUsb.close(handle)
     }
 
-    private fun transfer() {
+    private fun submitTransfer() {
         LibUsb.submitTransfer(availableTransfers.remove())
     }
 
@@ -328,22 +348,20 @@ class DesktopUsbInterface(
         }
     }
 
-    override fun submitBulkTransfer() {
-        availableTransfers.poll()
-            .let {
-                val result = LibUsb.submitTransfer(it)
-                if (result != LibUsb.SUCCESS) {
-                    throw
-                    CancellationException(
-                        "Error submitting transfer: ${
-                            LibUsb.errorName(
-                                result
-                            )
-                        }"
-                    )
-                }
+    override fun submitBulkTransfer() = availableTransfers.take()
+        .run {
+            val result = LibUsb.submitTransfer(this)
+            if (result != LibUsb.SUCCESS) {
+                throw
+                CancellationException(
+                    "Error submitting transfer: ${
+                        LibUsb.errorName(
+                            result
+                        )
+                    }"
+                )
             }
-    }
+        }
 
 
     companion object {
@@ -351,7 +369,7 @@ class DesktopUsbInterface(
         const val BULK_IN = LibUsb.ENDPOINT_IN.toInt() or LibUsb.TRANSFER_TYPE_BULK.toInt()
         const val CONTROL_IN = LibUsb.ENDPOINT_IN.toInt() or LibUsb.REQUEST_TYPE_VENDOR.toInt()
 
-        fun findDevice(vendorID: Short, productID: Short): DesktopUsbInterface {
+        fun findDevice(vendorID: Short, productID: Short, debug: Boolean = false): DesktopUsbInterface {
             LibUsb.init(null)
             val handle = LibUsb.openDeviceWithVidPid(null, vendorID, productID)
                 ?: throw RuntimeException(
@@ -362,7 +380,7 @@ class DesktopUsbInterface(
             val device = LibUsb.getDevice(handle)
             val descriptor = DeviceDescriptor()
             LibUsb.getDeviceDescriptor(device, descriptor)
-            return DesktopUsbInterface(handle, descriptor)
+            return DesktopUsbInterface(handle, descriptor, debug)
         }
 
         fun findAnyAvailableDevice(): DesktopUsbInterface? {
